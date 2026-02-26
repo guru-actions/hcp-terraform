@@ -17,6 +17,19 @@ inputs:
     description: Run in stub mode (true) or live mode (false)
     required: false
     default: 'true'
+  vcs_repo:
+    description: VCS repository (e.g., org/repo)
+    required: true
+  vcs_branch:
+    description: VCS branch name
+    required: true
+  vcs_path:
+    description: Path to Terraform configuration in repo
+    required: false
+    default: 'terraform/'
+  commit_sha:
+    description: Git commit SHA (optional, will be generated if not provided)
+    required: false
 
 outputs:
   run_id:
@@ -31,6 +44,24 @@ outputs:
   summary_json:
     description: Terraform plan summary as JSON string
     value: ${{ steps.run.outputs.summary_json }}
+  workspace_name:
+    description: Terraform Cloud workspace name
+    value: ${{ steps.run.outputs.workspace_name }}
+  run_status:
+    description: Detailed run status
+    value: ${{ steps.run.outputs.run_status }}
+  vcs_repo:
+    description: VCS repository
+    value: ${{ steps.run.outputs.vcs_repo }}
+  vcs_branch:
+    description: VCS branch
+    value: ${{ steps.run.outputs.vcs_branch }}
+  vcs_commit_sha:
+    description: VCS commit SHA
+    value: ${{ steps.run.outputs.vcs_commit_sha }}
+  tfc_org:
+    description: Terraform Cloud organization
+    value: ${{ steps.run.outputs.tfc_org }}
 
 runs:
   using: composite
@@ -44,48 +75,93 @@ runs:
         OPERATION: ${{ inputs.operation }}
         WORKSPACE: ${{ inputs.workspace }}
         STUB_MODE: ${{ inputs.stub_mode }}
+        VCS_REPO: ${{ inputs.vcs_repo }}
+        VCS_BRANCH: ${{ inputs.vcs_branch }}
+        VCS_PATH: ${{ inputs.vcs_path }}
+        COMMIT_SHA: ${{ inputs.commit_sha }}
       run: |
         set -e
 
         if [ "${STUB_MODE}" = "true" ]; then
+          # Generate Terraform Cloud org and workspace
+          TFC_ORG="demo-org"
+          WORKSPACE_NAME="${WORKSPACE}"
+
+          # Generate or use commit SHA
+          if [ -n "${COMMIT_SHA}" ]; then
+            VCS_COMMIT_SHA="${COMMIT_SHA}"
+          else
+            # Generate fake 8-char hex SHA
+            VCS_COMMIT_SHA="$(hexdump -n 4 -e '4/1 "%02x"' /dev/urandom 2>/dev/null || printf '%08x' $(($(date +%s) % 4294967296)))"
+          fi
+
+          echo "=== HCP Terraform VCS-Connected Workspace Run ==="
+          echo "Organization: ${TFC_ORG}"
+          echo "Workspace: ${WORKSPACE_NAME}"
+          echo "VCS Repo: ${VCS_REPO}"
+          echo "VCS Branch: ${VCS_BRANCH}"
+          echo "VCS Path: ${VCS_PATH}"
+          echo "Commit SHA: ${VCS_COMMIT_SHA}"
+          echo "Operation: ${OPERATION}"
+          echo ""
+
+          # Simulate realistic run lifecycle
+          echo "⏳ Run queued..."
+          sleep 1
+          echo "📋 Run planning..."
+          sleep 1
+
+          # Determine final status based on operation
+          case "${OPERATION}" in
+            plan)
+              STATUS="planned"
+              RUN_STATUS="Plan finished"
+              ;;
+            apply)
+              STATUS="applied"
+              RUN_STATUS="Apply finished"
+              ;;
+            drift)
+              STATUS="drifted"
+              RUN_STATUS="Drift detected"
+              ;;
+            *)
+              STATUS="planned"
+              RUN_STATUS="Plan finished"
+              ;;
+          esac
+
+          echo "✅ ${RUN_STATUS}"
+          echo ""
+
           # Generate realistic run ID with Alpine-safe randomness
           RAND="$(hexdump -n 8 -e '8/1 "%02x"' /dev/urandom 2>/dev/null || date +%N)"
           RUN_ID="run-$(date +%s)-${RAND}"
 
           # Generate HCP Terraform-style URL
-          RUN_URL="https://app.terraform.io/app/demo-org/workspaces/${WORKSPACE}/runs/${RUN_ID}"
-
-          # Determine status based on operation
-          case "${OPERATION}" in
-            plan)
-              STATUS="planned"
-              ;;
-            apply)
-              STATUS="applied"
-              ;;
-            drift)
-              STATUS="drifted"
-              ;;
-            *)
-              STATUS="planned"
-              ;;
-          esac
+          RUN_URL="https://app.terraform.io/app/${TFC_ORG}/workspaces/${WORKSPACE_NAME}/runs/${RUN_ID}"
 
           # Generate Terraform plan summary JSON (single line, valid JSON)
-          SUMMARY_JSON="{\"add\":1,\"change\":0,\"destroy\":0,\"operation\":\"${OPERATION}\",\"environment\":\"${ENVIRONMENT}\"}"
+          SUMMARY_JSON="{\"add\":1,\"change\":0,\"destroy\":0,\"operation\":\"${OPERATION}\",\"environment\":\"${ENVIRONMENT}\",\"vcs_repo\":\"${VCS_REPO}\",\"vcs_branch\":\"${VCS_BRANCH}\",\"commit_sha\":\"${VCS_COMMIT_SHA}\"}"
 
-          # Write outputs to CloudBees output files
+          # Write all outputs to CloudBees output files
           printf '%s' "${RUN_ID}" > "$CLOUDBEES_OUTPUTS/run_id"
           printf '%s' "${RUN_URL}" > "$CLOUDBEES_OUTPUTS/run_url"
           printf '%s' "${STATUS}" > "$CLOUDBEES_OUTPUTS/status"
           printf '%s' "${SUMMARY_JSON}" > "$CLOUDBEES_OUTPUTS/summary_json"
+          printf '%s' "${WORKSPACE_NAME}" > "$CLOUDBEES_OUTPUTS/workspace_name"
+          printf '%s' "${RUN_STATUS}" > "$CLOUDBEES_OUTPUTS/run_status"
+          printf '%s' "${VCS_REPO}" > "$CLOUDBEES_OUTPUTS/vcs_repo"
+          printf '%s' "${VCS_BRANCH}" > "$CLOUDBEES_OUTPUTS/vcs_branch"
+          printf '%s' "${VCS_COMMIT_SHA}" > "$CLOUDBEES_OUTPUTS/vcs_commit_sha"
+          printf '%s' "${TFC_ORG}" > "$CLOUDBEES_OUTPUTS/tfc_org"
 
-          # Log for visibility
-          echo "✓ Stub mode executed successfully"
-          echo "  Run ID: ${RUN_ID}"
-          echo "  Status: ${STATUS}"
-          echo "  URL: ${RUN_URL}"
-          echo "  Summary: ${SUMMARY_JSON}"
+          # Log summary
+          echo "=== Run Summary ==="
+          echo "Run ID: ${RUN_ID}"
+          echo "Status: ${STATUS}"
+          echo "Run URL: ${RUN_URL}"
+          echo ""
         else
           echo "Live mode not implemented yet"
           exit 1
