@@ -46,7 +46,7 @@ runs:
         STUB_MODE: ${{ inputs.stub_mode }}
       run: |
         if [ "${STUB_MODE}" = "true" ]; then
-          sh scripts/stub.sh
+          sh "${{ cloudbees.action.path }}/scripts/stub.sh"
         else
           echo "Live mode not implemented yet"
           exit 1
