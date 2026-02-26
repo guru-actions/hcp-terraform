@@ -295,27 +295,7 @@ runs:
           fi
 
           # Build JSON:API payload for creating a run
-          CREATE_RUN_PAYLOAD=$(cat <<PAYLOAD_EOF
-          {
-            "data": {
-              "type": "runs",
-              "attributes": {
-                "message": "${RUN_MESSAGE}",
-                "is-destroy": false,
-                "plan-only": ${IS_PLAN_ONLY}
-              },
-              "relationships": {
-                "workspace": {
-                  "data": {
-                    "type": "workspaces",
-                    "id": "${WORKSPACE_ID}"
-                  }
-                }
-              }
-            }
-          }
-PAYLOAD_EOF
-)
+          CREATE_RUN_PAYLOAD='{"data":{"type":"runs","attributes":{"message":"'"${RUN_MESSAGE}"'","is-destroy":false,"plan-only":'${IS_PLAN_ONLY}'},"relationships":{"workspace":{"data":{"type":"workspaces","id":"'"${WORKSPACE_ID}"'"}}}}}'
 
           CREATE_RUN_RESPONSE=$(curl -s -f \
             -X POST \
