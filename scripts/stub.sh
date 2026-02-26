@@ -7,7 +7,8 @@ OPERATION="${OPERATION}"
 WORKSPACE="${WORKSPACE}"
 
 # Generate realistic run ID (timestamp-based UUID style)
-RUN_ID="run-$(date +%s)-$(printf '%016x' $((RANDOM * RANDOM)))"
+RAND="$(hexdump -n 8 -e '8/1 "%02x"' /dev/urandom 2>/dev/null || date +%N)"
+RUN_ID="run-$(date +%s)-${RAND}"
 
 # Generate HCP Terraform-style URL
 RUN_URL="https://app.terraform.io/app/demo-org/workspaces/${WORKSPACE}/runs/${RUN_ID}"
