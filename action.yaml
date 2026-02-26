@@ -1,0 +1,53 @@
+apiVersion: automation.cloudbees.io/v1alpha1
+kind: action
+name: hcp-terraform
+description: Execute Terraform operations via HCP Terraform (stub and live modes)
+
+inputs:
+  environment:
+    description: Target environment (e.g., dev, prod)
+    required: true
+  operation:
+    description: 'Terraform operation: plan | apply | drift'
+    required: true
+  workspace:
+    description: HCP Terraform workspace name
+    required: true
+  stub_mode:
+    description: Run in stub mode (true) or live mode (false)
+    required: false
+    default: 'true'
+
+outputs:
+  run_id:
+    description: HCP Terraform run ID
+    value: ${{ steps.run.outputs.run_id }}
+  run_url:
+    description: URL to the HCP Terraform run
+    value: ${{ steps.run.outputs.run_url }}
+  status:
+    description: Run status (planned, applied, drifted)
+    value: ${{ steps.run.outputs.status }}
+  summary_json:
+    description: Terraform plan summary as JSON string
+    value: ${{ steps.run.outputs.summary_json }}
+
+runs:
+  using: composite
+  steps:
+    - id: run
+      name: Execute HCP Terraform Operation
+      uses: docker://alpine:3.20
+      shell: sh
+      env:
+        ENVIRONMENT: ${{ inputs.environment }}
+        OPERATION: ${{ inputs.operation }}
+        WORKSPACE: ${{ inputs.workspace }}
+        STUB_MODE: ${{ inputs.stub_mode }}
+      run: |
+        if [ "${STUB_MODE}" = "true" ]; then
+          sh scripts/stub.sh
+        else
+          echo "Live mode not implemented yet"
+          exit 1
+        fi
