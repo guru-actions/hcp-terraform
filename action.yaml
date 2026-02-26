@@ -36,6 +36,24 @@ inputs:
   monthly_cost:
     description: Infracost monthly cost estimate (optional, for enriching outputs)
     required: false
+  tfc_org:
+    description: Terraform Cloud organization name (required when stub_mode=false)
+    required: false
+  tfc_token:
+    description: Terraform Cloud API token (required when stub_mode=false)
+    required: false
+  tfc_api_base_url:
+    description: Terraform Cloud API base URL
+    required: false
+    default: 'https://app.terraform.io/api/v2'
+  poll_interval_seconds:
+    description: Polling interval in seconds for run status
+    required: false
+    default: '5'
+  poll_timeout_seconds:
+    description: Maximum time in seconds to wait for run completion
+    required: false
+    default: '600'
 
 outputs:
   run_id:
@@ -87,6 +105,11 @@ runs:
         COMMIT_SHA: ${{ inputs.commit_sha }}
         OPA_STATUS: ${{ inputs.opa_status }}
         MONTHLY_COST: ${{ inputs.monthly_cost }}
+        TFC_ORG: ${{ inputs.tfc_org }}
+        TFC_TOKEN: ${{ inputs.tfc_token }}
+        TFC_API_BASE_URL: ${{ inputs.tfc_api_base_url }}
+        POLL_INTERVAL_SECONDS: ${{ inputs.poll_interval_seconds }}
+        POLL_TIMEOUT_SECONDS: ${{ inputs.poll_timeout_seconds }}
       run: |
         set -e
 
@@ -183,6 +206,325 @@ runs:
           echo "Run URL: ${RUN_URL}"
           echo ""
         else
-          echo "Live mode not implemented yet"
-          exit 1
+          # ============================================================
+          # Live Mode: Real HCP Terraform API Integration
+          # ============================================================
+
+          echo "=== HCP Terraform Live Mode ==="
+          echo ""
+
+          # Install required tools
+          apk add --no-cache curl jq
+
+          # Validate required inputs for live mode
+          if [ -z "${TFC_TOKEN}" ]; then
+            echo "❌ ERROR: tfc_token is required when stub_mode=false"
+            exit 1
+          fi
+
+          if [ -z "${TFC_ORG}" ]; then
+            echo "❌ ERROR: tfc_org is required when stub_mode=false"
+            exit 1
+          fi
+
+          if [ -z "${WORKSPACE}" ]; then
+            echo "❌ ERROR: workspace is required when stub_mode=false"
+            exit 1
+          fi
+
+          # Use provided or default values
+          API_BASE_URL="${TFC_API_BASE_URL:-https://app.terraform.io/api/v2}"
+          POLL_INTERVAL="${POLL_INTERVAL_SECONDS:-5}"
+          POLL_TIMEOUT="${POLL_TIMEOUT_SECONDS:-600}"
+
+          # Generate or use commit SHA
+          if [ -n "${COMMIT_SHA}" ]; then
+            VCS_COMMIT_SHA="${COMMIT_SHA}"
+          else
+            VCS_COMMIT_SHA="$(hexdump -n 4 -e '4/1 "%02x"' /dev/urandom 2>/dev/null || printf '%08x' $(($(date +%s) % 4294967296)))"
+          fi
+
+          echo "Organization: ${TFC_ORG}"
+          echo "Workspace: ${WORKSPACE}"
+          echo "API Base URL: ${API_BASE_URL}"
+          echo ""
+
+          # ============================================================
+          # A) Lookup Workspace ID
+          # ============================================================
+
+          echo "🔍 Looking up workspace..."
+
+          WORKSPACE_RESPONSE=$(curl -s -f \
+            -H "Authorization: Bearer ${TFC_TOKEN}" \
+            -H "Content-Type: application/vnd.api+json" \
+            "${API_BASE_URL}/organizations/${TFC_ORG}/workspaces/${WORKSPACE}")
+
+          if [ $? -ne 0 ]; then
+            echo "❌ ERROR: Failed to lookup workspace '${WORKSPACE}' in organization '${TFC_ORG}'"
+            echo "Verify that:"
+            echo "  - Organization name is correct"
+            echo "  - Workspace exists"
+            echo "  - API token has permissions"
+            exit 1
+          fi
+
+          WORKSPACE_ID=$(echo "${WORKSPACE_RESPONSE}" | jq -r '.data.id')
+
+          if [ -z "${WORKSPACE_ID}" ] || [ "${WORKSPACE_ID}" = "null" ]; then
+            echo "❌ ERROR: Could not extract workspace ID from response"
+            exit 1
+          fi
+
+          echo "✅ Workspace ID: ${WORKSPACE_ID}"
+          echo ""
+
+          # ============================================================
+          # B) Create Run
+          # ============================================================
+
+          echo "🚀 Creating run..."
+
+          # Determine if this is a plan-only run
+          if [ "${OPERATION}" = "plan" ]; then
+            IS_PLAN_ONLY="true"
+            RUN_MESSAGE="CloudBees Unify: plan (${ENVIRONMENT}) ${VCS_REPO}@${VCS_BRANCH} ${VCS_COMMIT_SHA}"
+          else
+            IS_PLAN_ONLY="false"
+            RUN_MESSAGE="CloudBees Unify: ${OPERATION} (${ENVIRONMENT}) ${VCS_REPO}@${VCS_BRANCH} ${VCS_COMMIT_SHA}"
+          fi
+
+          # Build JSON:API payload for creating a run
+          CREATE_RUN_PAYLOAD=$(cat <<EOF
+{
+  "data": {
+    "type": "runs",
+    "attributes": {
+      "message": "${RUN_MESSAGE}",
+      "is-destroy": false,
+      "plan-only": ${IS_PLAN_ONLY}
+    },
+    "relationships": {
+      "workspace": {
+        "data": {
+          "type": "workspaces",
+          "id": "${WORKSPACE_ID}"
+        }
+      }
+    }
+  }
+}
+EOF
+)
+
+          CREATE_RUN_RESPONSE=$(curl -s -f \
+            -X POST \
+            -H "Authorization: Bearer ${TFC_TOKEN}" \
+            -H "Content-Type: application/vnd.api+json" \
+            -d "${CREATE_RUN_PAYLOAD}" \
+            "${API_BASE_URL}/runs")
+
+          if [ $? -ne 0 ]; then
+            echo "❌ ERROR: Failed to create run"
+            exit 1
+          fi
+
+          RUN_ID=$(echo "${CREATE_RUN_RESPONSE}" | jq -r '.data.id')
+
+          if [ -z "${RUN_ID}" ] || [ "${RUN_ID}" = "null" ]; then
+            echo "❌ ERROR: Could not extract run ID from response"
+            exit 1
+          fi
+
+          # Construct run URL
+          RUN_URL="https://app.terraform.io/app/${TFC_ORG}/workspaces/${WORKSPACE}/runs/${RUN_ID}"
+
+          echo "✅ Run created: ${RUN_ID}"
+          echo "🔗 Run URL: ${RUN_URL}"
+          echo ""
+
+          # ============================================================
+          # C) Poll Run Status
+          # ============================================================
+
+          echo "⏳ Polling run status..."
+          echo ""
+
+          START_TIME=$(date +%s)
+          CURRENT_STATUS=""
+
+          while true; do
+            # Get run status
+            RUN_STATUS_RESPONSE=$(curl -s -f \
+              -H "Authorization: Bearer ${TFC_TOKEN}" \
+              -H "Content-Type: application/vnd.api+json" \
+              "${API_BASE_URL}/runs/${RUN_ID}")
+
+            if [ $? -ne 0 ]; then
+              echo "❌ ERROR: Failed to poll run status"
+              exit 1
+            fi
+
+            CURRENT_STATUS=$(echo "${RUN_STATUS_RESPONSE}" | jq -r '.data.attributes.status')
+
+            echo "Status: ${CURRENT_STATUS}"
+
+            # Check for terminal states
+            case "${CURRENT_STATUS}" in
+              planned|planned_and_finished)
+                if [ "${OPERATION}" = "plan" ]; then
+                  echo ""
+                  echo "✅ Plan completed successfully"
+                  STATUS="planned"
+                  RUN_STATUS="Plan finished"
+                  break
+                else
+                  # For apply operations, we need to continue and apply
+                  echo "Plan phase completed, ready to apply"
+                  break
+                fi
+                ;;
+              applied)
+                echo ""
+                echo "✅ Apply completed successfully"
+                STATUS="applied"
+                RUN_STATUS="Apply finished"
+                break
+                ;;
+              errored|canceled|force_canceled)
+                echo ""
+                echo "❌ ERROR: Run failed with status: ${CURRENT_STATUS}"
+                exit 1
+                ;;
+              discarded)
+                echo ""
+                echo "❌ ERROR: Run was discarded"
+                exit 1
+                ;;
+            esac
+
+            # Check timeout
+            CURRENT_TIME=$(date +%s)
+            ELAPSED=$((CURRENT_TIME - START_TIME))
+
+            if [ ${ELAPSED} -ge ${POLL_TIMEOUT} ]; then
+              echo ""
+              echo "❌ ERROR: Polling timeout (${POLL_TIMEOUT}s) exceeded"
+              exit 1
+            fi
+
+            # Wait before next poll
+            sleep ${POLL_INTERVAL}
+          done
+
+          # ============================================================
+          # D) Apply Action (only if operation=apply)
+          # ============================================================
+
+          if [ "${OPERATION}" = "apply" ] && [ "${STATUS}" != "applied" ]; then
+            echo ""
+            echo "🚀 Applying run..."
+
+            APPLY_RESPONSE=$(curl -s -f \
+              -X POST \
+              -H "Authorization: Bearer ${TFC_TOKEN}" \
+              -H "Content-Type: application/vnd.api+json" \
+              "${API_BASE_URL}/runs/${RUN_ID}/actions/apply")
+
+            if [ $? -ne 0 ]; then
+              echo "❌ ERROR: Failed to apply run"
+              exit 1
+            fi
+
+            echo "✅ Apply action triggered"
+            echo ""
+
+            # Continue polling until applied
+            echo "⏳ Waiting for apply to complete..."
+            echo ""
+
+            while true; do
+              RUN_STATUS_RESPONSE=$(curl -s -f \
+                -H "Authorization: Bearer ${TFC_TOKEN}" \
+                -H "Content-Type: application/vnd.api+json" \
+                "${API_BASE_URL}/runs/${RUN_ID}")
+
+              if [ $? -ne 0 ]; then
+                echo "❌ ERROR: Failed to poll run status"
+                exit 1
+              fi
+
+              CURRENT_STATUS=$(echo "${RUN_STATUS_RESPONSE}" | jq -r '.data.attributes.status')
+
+              echo "Status: ${CURRENT_STATUS}"
+
+              case "${CURRENT_STATUS}" in
+                applied)
+                  echo ""
+                  echo "✅ Apply completed successfully"
+                  STATUS="applied"
+                  RUN_STATUS="Apply finished"
+                  break
+                  ;;
+                errored|canceled|force_canceled|discarded)
+                  echo ""
+                  echo "❌ ERROR: Run failed with status: ${CURRENT_STATUS}"
+                  exit 1
+                  ;;
+              esac
+
+              # Check timeout
+              CURRENT_TIME=$(date +%s)
+              ELAPSED=$((CURRENT_TIME - START_TIME))
+
+              if [ ${ELAPSED} -ge ${POLL_TIMEOUT} ]; then
+                echo ""
+                echo "❌ ERROR: Polling timeout (${POLL_TIMEOUT}s) exceeded"
+                exit 1
+              fi
+
+              sleep ${POLL_INTERVAL}
+            done
+          fi
+
+          echo ""
+          echo "=== Run Summary ==="
+          echo "Run ID: ${RUN_ID}"
+          echo "Status: ${STATUS}"
+          echo "Run URL: ${RUN_URL}"
+          echo ""
+
+          # ============================================================
+          # Build Output Summary JSON
+          # ============================================================
+
+          # Build summary JSON with optional governance fields
+          SUMMARY_JSON="{\"operation\":\"${OPERATION}\",\"environment\":\"${ENVIRONMENT}\",\"vcs_repo\":\"${VCS_REPO}\",\"vcs_branch\":\"${VCS_BRANCH}\",\"commit_sha\":\"${VCS_COMMIT_SHA}\""
+
+          # Add optional OPA status if provided
+          if [ -n "${OPA_STATUS}" ]; then
+            SUMMARY_JSON="${SUMMARY_JSON},\"opa_status\":\"${OPA_STATUS}\""
+          fi
+
+          # Add optional monthly cost if provided
+          if [ -n "${MONTHLY_COST}" ]; then
+            SUMMARY_JSON="${SUMMARY_JSON},\"monthly_cost\":\"${MONTHLY_COST}\""
+          fi
+
+          SUMMARY_JSON="${SUMMARY_JSON}}"
+
+          # ============================================================
+          # Write Outputs (same contract as stub mode)
+          # ============================================================
+
+          printf '%s' "${RUN_ID}" > "$CLOUDBEES_OUTPUTS/run_id"
+          printf '%s' "${RUN_URL}" > "$CLOUDBEES_OUTPUTS/run_url"
+          printf '%s' "${STATUS}" > "$CLOUDBEES_OUTPUTS/status"
+          printf '%s' "${SUMMARY_JSON}" > "$CLOUDBEES_OUTPUTS/summary_json"
+          printf '%s' "${WORKSPACE}" > "$CLOUDBEES_OUTPUTS/workspace_name"
+          printf '%s' "${RUN_STATUS}" > "$CLOUDBEES_OUTPUTS/run_status"
+          printf '%s' "${VCS_REPO}" > "$CLOUDBEES_OUTPUTS/vcs_repo"
+          printf '%s' "${VCS_BRANCH}" > "$CLOUDBEES_OUTPUTS/vcs_branch"
+          printf '%s' "${VCS_COMMIT_SHA}" > "$CLOUDBEES_OUTPUTS/vcs_commit_sha"
+          printf '%s' "${TFC_ORG}" > "$CLOUDBEES_OUTPUTS/tfc_org"
         fi
